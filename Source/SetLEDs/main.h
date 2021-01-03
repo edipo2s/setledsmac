@@ -22,4 +22,6 @@ void startMonitor(void);
 void setAllKeyboards(LedState changes[]);
 CFMutableDictionaryRef getKeyboardDictionary(void);
 CGEventRef eventCallback(CGEventTapProxy proxy, CGEventType type, CGEventRef event, void *refcon);
+bool isAnyNumLockEnabled(int led);
+bool isNumLockEnabled(IOHIDDeviceRef device, CFDictionaryRef keyboardDictionary, int led);
 #endif

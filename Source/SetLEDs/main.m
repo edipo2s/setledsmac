@@ -106,7 +106,7 @@ void startMonitor()
             goto bail;
         }
     
-        printf("Ceated event tap.\n");
+        printf("Created event tap.\n");
         runLoopSource = CFMachPortCreateRunLoopSource(kCFAllocatorDefault, eventTap, 0);
         CFRunLoopAddSource(CFRunLoopGetCurrent(), runLoopSource, kCFRunLoopCommonModes);
         CGEventTapEnable(eventTap, true);
@@ -134,6 +134,105 @@ bail:
     
 }
 
+Boolean isKeyboardDevice(IOHIDDeviceRef device)
+{
+    return IOHIDDeviceConformsTo(device, kHIDPage_GenericDesktop, kHIDUsage_GD_Keyboard);
+}
+
+bool isNumLockEnabled(IOHIDDeviceRef device, CFDictionaryRef keyboardDictionary, int led)
+{
+    CFStringRef deviceNameRef = IOHIDDeviceGetProperty(device, CFSTR(kIOHIDProductKey));
+    if (!deviceNameRef) return false;
+    
+    const char * deviceName = CFStringGetCStringPtr(deviceNameRef, kCFStringEncodingUTF8);
+    
+    if (nameMatch && fnmatch(nameMatch, deviceName, 0) != 0)
+        return false;
+    
+    // printf("\nDevice: \"%s\" ", deviceName));
+    
+    CFArrayRef elements = IOHIDDeviceCopyMatchingElements(device, keyboardDictionary, kIOHIDOptionsTypeNone);
+    bool missingState = false;
+    if (elements) {
+        for (CFIndex elementIndex = 0; elementIndex < CFArrayGetCount(elements); elementIndex++) {
+            IOHIDElementRef element = (IOHIDElementRef)CFArrayGetValueAtIndex(elements, elementIndex);
+            
+            if (element && kHIDPage_LEDs == IOHIDElementGetUsagePage(element)) {
+                uint32_t ledElement = IOHIDElementGetUsage(element);
+                
+                if (ledElement > maxLeds || ledElement != led) break;
+                
+                // Get current keyboard led status
+                IOHIDValueRef currentValue = 0;
+                IOHIDDeviceGetValue(device, element, &currentValue);
+                
+                if (currentValue == 0x00) {
+                    missingState = true;
+                } else {
+                    long current = IOHIDValueGetIntegerValue(currentValue);
+                    CFRelease(currentValue);
+                    
+                    return current == 0;
+                }
+            }
+        }
+        CFRelease(elements);
+    }
+    
+    // printf("\n");
+    if (missingState) {
+        printf("\nSome state could not be determined. Please try running as root/sudo.\n");
+    }
+    return false;
+}
+
+bool isAnyLedEnabled(int led)
+{
+    IOHIDManagerRef manager = IOHIDManagerCreate(kCFAllocatorDefault, kIOHIDOptionsTypeNone);
+    if (!manager) {
+        fprintf(stderr, "ERROR: Failed to create IOHID manager.\n");
+        return false;
+    }
+    
+    CFDictionaryRef keyboard = getKeyboardDictionary();
+    if (!keyboard) {
+        fprintf(stderr, "ERROR: Failed to get dictionary usage page for kHIDUsage_GD_Keyboard.\n");
+        return false;
+    }
+    
+    IOHIDManagerOpen(manager, kIOHIDOptionsTypeNone);
+    IOHIDManagerSetDeviceMatching(manager, keyboard);
+    
+    bool enabled = false;
+    CFSetRef devices = IOHIDManagerCopyDevices(manager);
+    if (devices) {
+        CFIndex deviceCount = CFSetGetCount(devices);
+        if (deviceCount == 0) {
+            fprintf(stderr, "ERROR: Could not find any keyboard devices.\n");
+        }
+        else {
+            // Loop through all keyboards attempting to get or display led state
+            IOHIDDeviceRef *deviceRefs = malloc(sizeof(IOHIDDeviceRef) * deviceCount);
+            if (deviceRefs) {
+                CFSetGetValues(devices, (const void **) deviceRefs);
+                for (CFIndex deviceIndex = 0; deviceIndex < deviceCount; deviceIndex++)
+                if (isKeyboardDevice(deviceRefs[deviceIndex])) {
+                    if (isNumLockEnabled(deviceRefs[deviceIndex], keyboard, led)) {
+                        enabled = true;
+                    }
+                }
+                
+                free(deviceRefs);
+            }
+        }
+        
+        CFRelease(devices);
+    }
+    
+    CFRelease(keyboard);
+    return enabled;
+}
+
 //callback for mouse/keyboard events
 CGEventRef eventCallback(CGEventTapProxy proxy, CGEventType type, CGEventRef event, void *refcon)
 {
@@ -145,12 +244,68 @@ CGEventRef eventCallback(CGEventTapProxy proxy, CGEventType type, CGEventRef eve
         return event;
     }
     
+    CGKeyCode keyCode = 0;
+    keyCode = (CGKeyCode)CGEventGetIntegerValueField(event, kCGKeyboardEventKeycode);
+    
+    if(kCGEventKeyDown == type && isAnyLedEnabled((int)kHIDUsage_LED_NumLock))
+    {
+        switch (keyCode)
+        {
+            case 0x41:  // period
+                return CGEventCreateKeyboardEvent(NULL, (CGKeyCode)0x75, true); // Delete
+            case 0x52:  // keypad_0
+                return CGEventCreateKeyboardEvent(NULL, (CGKeyCode)0x83, true); // Launchpad
+            case 0x53:  // keypad_1
+                return CGEventCreateKeyboardEvent(NULL, (CGKeyCode)0x77, true); // End
+            case 0x54:  // keypad_2
+                return CGEventCreateKeyboardEvent(NULL, (CGKeyCode)0x7d, true); // Down Arrow
+            case 0x55:  // keypad_3
+                return CGEventCreateKeyboardEvent(NULL, (CGKeyCode)0x79, true); // Page Down
+            case 0x56:  // keypad_4
+                return CGEventCreateKeyboardEvent(NULL, (CGKeyCode)0x7b, true); // Left Arrow
+            case 0x57:  // keypad_5
+                return CGEventCreateKeyboardEvent(NULL, (CGKeyCode)0x31, true); // Space
+            case 0x58:  // keypad_6
+                return CGEventCreateKeyboardEvent(NULL, (CGKeyCode)0x7c, true); // Right Arrow
+            case 0x59:  // keypad_7
+                return CGEventCreateKeyboardEvent(NULL, (CGKeyCode)0x73, true); // Home
+            case 0x5b:  // keypad_8
+                return CGEventCreateKeyboardEvent(NULL, (CGKeyCode)0x7e, true); // Up Arrow
+            case 0x5c:  // keypad_9
+                return CGEventCreateKeyboardEvent(NULL, (CGKeyCode)0x74, true); // Page Up
+        }
+    }
+    
     if(kCGEventKeyUp == type)
     {
-        CGKeyCode keyCode = 0;
         LedState changes[] = { NoChange, NoChange, NoChange, NoChange };
-        keyCode = (CGKeyCode)CGEventGetIntegerValueField(event, kCGKeyboardEventKeycode);
         
+        switch (keyCode)
+        {
+            case 0x41:  // period
+                return CGEventCreateKeyboardEvent(NULL, (CGKeyCode)0x75, false); // Delete
+            case 0x52:  // keypad_0
+                return CGEventCreateKeyboardEvent(NULL, (CGKeyCode)0x83, false); // Launchpad
+            case 0x53:  // keypad_1
+                return CGEventCreateKeyboardEvent(NULL, (CGKeyCode)0x77, false); // End
+            case 0x54:  // keypad_2
+                return CGEventCreateKeyboardEvent(NULL, (CGKeyCode)0x7d, false); // Down Arrow
+            case 0x55:  // keypad_3
+                return CGEventCreateKeyboardEvent(NULL, (CGKeyCode)0x79, false); // Page Down
+            case 0x56:  // keypad_4
+                return CGEventCreateKeyboardEvent(NULL, (CGKeyCode)0x7b, false); // Left Arrow
+            case 0x57:  // keypad_5
+                return CGEventCreateKeyboardEvent(NULL, (CGKeyCode)0x31, false); // Space
+            case 0x58:  // keypad_6
+                return CGEventCreateKeyboardEvent(NULL, (CGKeyCode)0x7c, false); // Right Arrow
+            case 0x59:  // keypad_7
+                return CGEventCreateKeyboardEvent(NULL, (CGKeyCode)0x73, false); // Home
+            case 0x5b:  // keypad_8
+                return CGEventCreateKeyboardEvent(NULL, (CGKeyCode)0x7e, false); // Up Arrow
+            case 0x5c:  // keypad_9
+                return CGEventCreateKeyboardEvent(NULL, (CGKeyCode)0x74, false); // Page Up
+        }
+    
         switch (keyCode)
         {
             case 0x39:
@@ -180,11 +335,6 @@ void explainUsage()
            "Specify -v to shows state of all leds.\n"
            "Specify -name to match keyboard name with a wildcard\n"
            "Use the \"monitor\" sub command to run continously and toggle LEDs on keypress.");
-}
-
-Boolean isKeyboardDevice(IOHIDDeviceRef device)
-{
-    return IOHIDDeviceConformsTo(device, kHIDPage_GenericDesktop, kHIDUsage_GD_Keyboard);
 }
 
 void setKeyboard(IOHIDDeviceRef device, CFDictionaryRef keyboardDictionary, LedState changes[])
